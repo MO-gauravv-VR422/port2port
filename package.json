@@ -1,0 +1,30 @@
+{
+  "name": "port2port",
+  "version": "1.0.0",
+  "type": "module",
+  "title": "Port2Port",
+  "description": "A simple terminal-based reverse proxy server for development that allows dynamic path-to-port mapping.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "bin": {
+    "port2port": "./index.js"
+  },
+  "keywords": [
+    "moamc",
+    "tools",
+    "port",
+    "networking",
+    "js"
+  ],
+  "author": "Gaurav Vishwakarma",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2",
+    "http-proxy-middleware": "^2.0.6"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
