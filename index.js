@@ -1,8 +1,52 @@
 #!/usr/bin/env node
 
+// ╱╭━━━╮╱╭━━━╮╱╭━━━╮╱╭━━━━╮╱╭━━━╮╱╭━━━╮╱╭━━━╮╱╭━━━╮╱╭━━━━╮
+// ╱┃╭━╮┃╱┃╭━╮┃╱┃╭━╮┃╱┃╭╮╭╮┃╱┃╭━╮┃╱┃╭━╮┃╱┃╭━╮┃╱┃╭━╮┃╱┃╭╮╭╮┃
+// ╱┃╰━╯┃╱┃┃╱┃┃╱┃╰━╯┃╱╰╯┃┃╰╯╱╰╯╭╯┃╱┃╰━╯┃╱┃┃╱┃┃╱┃╰━╯┃╱╰╯┃┃╰╯
+// ╱┃╭━━╯╱┃┃╱┃┃╱┃╭╮╭╯╱╱╱┃┃╱╱╱╭━╯╭╯╱┃╭━━╯╱┃┃╱┃┃╱┃╭╮╭╯╱╱╱┃┃╱╱
+// ╱┃┃╱╱╱╱┃╰━╯┃╱┃┃┃╰╮╱╱╱┃┃╱╱╱┃╰━━╮╱┃┃╱╱╱╱┃╰━╯┃╱┃┃┃╰╮╱╱╱┃┃╱╱
+// ╱╰╯╱╱╱╱╰━━━╯╱╰╯╰━╯╱╱╱╰╯╱╱╱╰━━━╯╱╰╯╱╱╱╱╰━━━╯╱╰╯╰━╯╱╱╱╰╯╱╱
+
 import express from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import readline from 'readline';
+import { createRequire } from 'module';
+import fs from 'fs';
+import path from 'path';
+
+const require = createRequire(import.meta.url);
+const { version } = require('./package.json');
+
+// --- CLI Flags ---
+const args = process.argv.slice(2);
+const fileFlagIndex = args.findIndex(a => a === '-f');
+const configFile = fileFlagIndex >= 0 ? args[fileFlagIndex + 1] : 'port2port.json';
+
+if (args.includes('-h') || args.includes('--help')) {
+    console.log(`
+🧰  Dynamic port2port 
+
+Usage:
+  $ port2port                 Start the proxy server (asks for host port)
+  $ port2port -f file.json    Load mapping config from custom JSON file
+  $ port2port -h | --help     Show help
+  $ port2port -v | --version  Show version
+
+JSON Format:
+  {
+    "mappings": {
+        "/v2": 5000,
+        "/api": { "port": 6000, "rewrite": "/v3" }
+    }
+  }
+`);
+    process.exit(0);
+}
+
+if (args.includes('-v') || args.includes('--version')) {
+    console.log(`port2port version: ${version}`);
+    process.exit(0);
+}
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // Ignore SSL certs
 
@@ -15,6 +59,26 @@ const rl = readline.createInterface({
 
 const proxyCache = new Map(); // cacheKey → proxyMiddleware
 const mappings = new Map();   // pathPrefix → { port, rewrite }
+
+// Load mappings from config file if exists
+try {
+    const configPath = path.resolve(process.cwd(), configFile);
+    if (fs.existsSync(configPath)) {
+        const json = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        const loadedMappings = json?.mappings || {};
+        for (const [pathKey, config] of Object.entries(loadedMappings)) {
+            if (typeof config === 'number') {
+                mappings.set(pathKey, { port: config, rewrite: null });
+            } else if (typeof config === 'object' && config.port) {
+                mappings.set(pathKey, { port: config.port, rewrite: config.rewrite || null });
+            }
+        }
+        console.log(`✅ Loaded mappings from ${configFile}`);
+    }
+} catch (err) {
+    console.error(`❌ Failed to read ${configFile}: ${err.message}`);
+    process.exit(1);
+}
 
 rl.question('Enter hosting port (default 4000): ', (answer) => {
     const HOST_PORT = parseInt(answer.trim(), 10) || 4000;
