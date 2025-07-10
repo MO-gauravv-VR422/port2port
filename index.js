@@ -24,7 +24,7 @@ const configFile = fileFlagIndex >= 0 ? args[fileFlagIndex + 1] : 'port2port.jso
 
 if (args.includes('-h') || args.includes('--help')) {
     console.log(`
-🧰  Dynamic port2port 
+🧰  Dynamic port2port
 
 Usage:
   $ port2port                 Start the proxy server (asks for host port)
@@ -36,7 +36,9 @@ JSON Format:
   {
     "mappings": {
         "/v2": 5000,
-        "/api": { "port": 6000, "rewrite": "/v3" }
+        "/api": { "port": 6000, "rewrite": "/v3" },
+        "/api/v1": "https://external.com/v1",
+        "/chat": { "target": "wss://ws.remotehost.com/socket" }
     }
   }
 `);
@@ -48,29 +50,35 @@ if (args.includes('-v') || args.includes('--version')) {
     process.exit(0);
 }
 
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // Ignore SSL certs
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
     terminal: true,
-    prompt: '🔗 Enter `path>port/rewrite?` or just `port` (e.g., /v2>6000/api or 5000): ',
+    prompt: '🔗 Enter `path>port/rewrite?` or just `port` (e.g., /v2>6000/api or 5000): '
 });
 
-const proxyCache = new Map(); // cacheKey → proxyMiddleware
-const mappings = new Map();   // pathPrefix → { port, rewrite }
+const proxyCache = new Map();
+const mappings = new Map();
 
-// Load mappings from config file if exists
+// Load config file if exists
 try {
     const configPath = path.resolve(process.cwd(), configFile);
     if (fs.existsSync(configPath)) {
         const json = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
         const loadedMappings = json?.mappings || {};
-        for (const [pathKey, config] of Object.entries(loadedMappings)) {
-            if (typeof config === 'number') {
-                mappings.set(pathKey, { port: config, rewrite: null });
-            } else if (typeof config === 'object' && config.port) {
-                mappings.set(pathKey, { port: config.port, rewrite: config.rewrite || null });
+        for (const [pathKey, conf] of Object.entries(loadedMappings)) {
+            if (typeof conf === 'number') {
+                mappings.set(pathKey, { port: conf, rewrite: null });
+            } else if (typeof conf === 'object') {
+                if (conf.target) {
+                    mappings.set(pathKey, { target: conf.target });
+                } else if (conf.port) {
+                    mappings.set(pathKey, { port: conf.port, rewrite: conf.rewrite || null });
+                }
+            } else if (typeof conf === 'string') {
+                mappings.set(pathKey, { target: conf });
             }
         }
         console.log(`✅ Loaded mappings from ${configFile}`);
@@ -93,46 +101,62 @@ rl.question('Enter hosting port (default 4000): ', (answer) => {
             return res.status(502).send(`❌ No proxy mapping found for ${req.path}`);
         }
 
-        const [inputPath, { port, rewrite }] = matchedEntry;
-        const cacheKey = `${inputPath}->${port}${rewrite ? rewrite : ''}`;
+        const [inputPath, conf] = matchedEntry;
+
+        let target;
+        let pathRewrite;
+
+        if (conf.target) {
+            target = conf.target;
+            const basePath = conf.target.replace(/^(https?:|wss?:|ftps?:|ftp:)\/\/[^/]+/, '') || '/';
+            pathRewrite = { [`^${inputPath}`]: basePath };
+        } else {
+            target = `http://localhost:${conf.port}`;
+            pathRewrite = conf.rewrite ? { [`^${inputPath}`]: conf.rewrite } : undefined;
+        }
+
+        const cacheKey = `${inputPath}->${target}`;
 
         if (!proxyCache.has(cacheKey)) {
             const proxy = createProxyMiddleware({
-                target: `http://localhost:${port}`,
+                target,
                 changeOrigin: true,
                 ws: true,
                 logLevel: 'silent',
-                pathRewrite: rewrite ? {
-                    [`^${inputPath}`]: rewrite
-                } : undefined
+                pathRewrite
             });
             proxyCache.set(cacheKey, proxy);
         }
-
         return proxyCache.get(cacheKey)(req, res, next);
     });
 
     app.listen(HOST_PORT, () => {
-        renderScreen(HOST_PORT, mappings);
+        renderScreen(HOST_PORT);
         rl.prompt();
     });
 
-    const renderScreen = (PORT, map) => {
+    const renderScreen = (PORT) => {
         console.clear();
         console.log(`⚙️ Proxy server running at: http://localhost:${PORT}`);
         console.log('📥 Instructions:');
         console.log('  - Type a port (e.g., 5000) to map root path "/"');
-        console.log('  - Type a path>port or path>port/rewrite to map custom paths\n');
+        console.log('  - Type a path>port or path>port/rewrite or path>fullURL to map custom paths\n');
 
-        if (map.size === 0) {
+        if (mappings.size === 0) {
             console.log('🔁 No path mappings yet.');
         } else {
             console.log('🔁 Current Path Mappings:');
             console.table(
-                Array.from(map.entries()).map(([path, { port, rewrite }]) => ({
-                    Path: path,
-                    '→ Proxy To': `http://localhost:${port}${rewrite ? ` (rewrite: ${rewrite})` : ''}`,
-                }))
+                Array.from(mappings.entries()).map(([path, conf]) => {
+                    if (conf.target) {
+                        return { Path: path, '→ Proxy To': conf.target };
+                    } else {
+                        return {
+                            Path: path,
+                            '→ Proxy To': `http://localhost:${conf.port}${conf.rewrite ? ` (rewrite: ${conf.rewrite})` : ''}`
+                        };
+                    }
+                })
             );
         }
         rl.prompt();
@@ -141,7 +165,21 @@ rl.question('Enter hosting port (default 4000): ', (answer) => {
     rl.on('line', (input) => {
         const trimmed = input.trim();
 
-        // Matches inputs like: /v2>6000 or /v2/max>8000/api
+        const urlMatch = trimmed.match(/^(.+?)>(https?:\/\/|wss?:\/\/|ftps?:\/\/|ftp:\/\/)(.+)$/);
+        if (urlMatch) {
+            const inputPath = urlMatch[1].trim();
+            const protocol = urlMatch[2];
+            const target = protocol + urlMatch[3];
+
+            if (!inputPath.startsWith('/')) {
+                console.log(`❌ Invalid path: "${inputPath}". Must start with '/'`);
+            } else {
+                mappings.set(inputPath, { target });
+            }
+            renderScreen(HOST_PORT);
+            return;
+        }
+
         const match = trimmed.match(/^(.+?)>(\d{2,5})(\/.*)?$/);
         if (match) {
             const inputPath = match[1].trim();
@@ -153,16 +191,14 @@ rl.question('Enter hosting port (default 4000): ', (answer) => {
             } else {
                 mappings.set(inputPath, { port, rewrite });
             }
-
-            renderScreen(HOST_PORT, mappings);
+            renderScreen(HOST_PORT);
             return;
         }
 
-        // Handle: just "5000"
         const portOnly = parseInt(trimmed, 10);
         if (!isNaN(portOnly) && portOnly > 0 && portOnly < 65536) {
             mappings.set('/', { port: portOnly, rewrite: null });
-            renderScreen(HOST_PORT, mappings);
+            renderScreen(HOST_PORT);
             return;
         }
 
