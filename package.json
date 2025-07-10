@@ -16,7 +16,8 @@
     "tools",
     "port",
     "networking",
-    "js"
+    "js",
+    "cli"
   ],
   "author": "Gaurav Vishwakarma",
   "license": "MIT",

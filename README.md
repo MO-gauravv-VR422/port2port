@@ -1,3 +1,7 @@
+
+<!-- Add image ./port2port.png -->
+![port2port](./port2port.png)
+
 # ⚡ port2port
 
 🧭 A flexible, terminal-based reverse proxy server for local development. Dynamically map URL paths to local ports, rewrite routes, and manage it all from the terminal, with optional config file support.
@@ -125,4 +129,4 @@ $ port2port -f dev.json
 
 ## 📄 License
 
-MIT © 2025 \[Motilal Oswal]
+MIT © 2025
