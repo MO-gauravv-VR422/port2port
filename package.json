@@ -6,10 +6,10 @@
   "description": "A simple terminal-based reverse proxy server for development that allows dynamic path-to-port mapping.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "bun build index.js --target node --outfile dist/index.js"
   },
   "bin": {
-    "port2port": "./index.js"
+    "port2port": "./dist/index.js"
   },
   "keywords": [
     "moamc",
@@ -22,6 +22,7 @@
   "author": "Gaurav Vishwakarma",
   "license": "MIT",
   "dependencies": {
+    "@types/express": "^5.0.3",
     "express": "^4.19.2",
     "http-proxy-middleware": "^2.0.6"
   },
