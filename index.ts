@@ -11,12 +11,14 @@ import express from 'express';
 import * as core from "express-serve-static-core";
 import { createProxyMiddleware, RequestHandler } from 'http-proxy-middleware';
 import readline from 'readline';
-import { createRequire } from 'module';
 import fs from 'fs';
 import path from 'path';
-
-const require = createRequire(import.meta.url);
 import { version } from './package.json';
+import { isPortLivePingChecker } from './helpers/pinger';
+import { renderScreen } from './helpers/table-renderer';
+
+process.env.NODE_OPTIONS = "--input-type=module"
+process.env.NODE_ENV = "development"
 
 // --- CLI Flags ---
 const args = process.argv.slice(2);
@@ -63,43 +65,21 @@ const rl = readline.createInterface({
 });
 
 
-/**
- * Renders the main screen for the proxy server.
- * @param PORT Hosting port for the proxy server
- * @param mappings Map of path mappings
- */
-const renderScreen = (PORT: number, mappings: Map<string, MappedTarget>) => {
-    console.clear();
-    console.log(`⚙️ Proxy server running at: http://localhost:${PORT}`);
-    console.log('📥 Instructions:');
-    console.log('  - Type a port (e.g., 5000) to map root path "/"');
-    console.log('  - Type a path>port or path>port/rewrite or path>fullURL to map custom paths\n');
+// Set the readline prompt to the current working directory
+setInterval(async () => {
+    const updated = await isPortLivePingChecker(subdomains);
+    if (updated) renderScreen(rl)(hostPort, subdomains);
+}, 5000); // Check every 5 seconds
 
-    if (mappings.size === 0) {
-        console.log('🔁 No path mappings yet.');
-    } else {
-        console.log('🔁 Current Path Mappings:');
-        console.table(
-            Array.from(mappings.entries()).map(([path, conf]) => {
-                if (conf.target) {
-                    return { Path: path, '→ Proxy To': conf.target };
-                } else {
-                    return {
-                        Path: path,
-                        '→ Proxy To': `http://localhost:${conf.port}${conf.rewrite
-                            ? ` (rewrite: ${conf.rewrite})` : ''}`
-                    };
-                }
-            })
-        );
-    }
-    rl.prompt();
-};
 
 // Used for storing the initialized proxy connections
 const proxyCache = new Map<string, RequestHandler>();
 // Used for storing path mappings, passed by user or config file
 const mappings = new Map<string, MappedTarget>();
+// Used for storing subdomain mappings
+const subdomains = {
+    ".": new Map<string, MappedTarget>()
+}
 
 
 /* * Function to create a proxy middleware for a given path and target.
@@ -107,11 +87,10 @@ const mappings = new Map<string, MappedTarget>();
 * Otherwise, it creates a new proxy middleware and stores it in the cache.
 */
 const createOrUpdateProxies = (
-    inputPath: string,
+    cacheKey: string,
     target: string,
-    pathRewrite?: Record<string, string>
+    pathRewrite?: Record<string, string>,
 ) => {
-    const cacheKey = `${inputPath}->${target}`;
 
     // Create a new proxy middleware if it doesn't exist in the cache
     if (!proxyCache.has(cacheKey)) {
@@ -120,7 +99,15 @@ const createOrUpdateProxies = (
             changeOrigin: true,
             ws: true,
             logLevel: 'silent',
-            pathRewrite
+            pathRewrite,
+            selfHandleResponse: false,
+            onProxyReq: (proxyReq, req) => {
+                if (req.body) {
+                    const bodyData = JSON.stringify(req.body);
+                    proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+                    proxyReq.write(bodyData);
+                }
+            }
         });
         proxyCache.set(cacheKey, proxy);
     }
@@ -167,31 +154,81 @@ try {
 
         // Iterate over the loaded mappings and populate the mappings Map
         for (const [pathKey, conf] of Object.entries(loadedMappings)) {
-            if (typeof conf === 'number') {
-                mappings.set(pathKey, { port: conf, rewrite: null });
-            } else if (typeof conf === 'object') {
-                if (conf.target) {
-                    mappings.set(pathKey, { target: conf.target });
-                } else if (conf.port) {
-                    mappings.set(pathKey, { port: conf.port, rewrite: conf.rewrite || null });
+
+            if (pathKey.startsWith('@')) {
+                // Subdomain handling
+
+                const subdomain = pathKey.slice(1);
+                if (!subdomains[subdomain]) {
+                    subdomains[subdomain] = new Map<string, MappedTarget>();
                 }
-            } else if (typeof conf === 'string') {
-                mappings.set(pathKey, { target: conf });
+                const subdomainMappings = conf || {};
+
+                Object.entries(subdomainMappings).forEach(([subPath, subConf]) => {
+                    if (typeof subConf === 'number') {
+                        subdomains[subdomain].set(subPath, {
+                            port: subConf, rewrite: null, description: null
+                        });
+                    } else if (typeof subConf === 'object') {
+                        if (subConf.target) {
+                            subdomains[subdomain].set(subPath, {
+                                target: subConf.target,
+                                description: subConf.description || null
+                            });
+                        } else if (subConf.port) {
+                            subdomains[subdomain].set(subPath, {
+                                port: subConf.port, rewrite: subConf.rewrite || null,
+                                description: subConf.description || null
+                            });
+                        }
+                    } else if (typeof subConf === 'string') {
+                        subdomains[subdomain].set(subPath, { target: subConf, description: null });
+                    }
+                })
+
+            } else if (pathKey.startsWith('/')) {
+                // If the subdomain is ".", we treat it as the default subdomain
+
+                if (typeof conf === 'number') {
+                    subdomains["."].set(pathKey, { port: conf, rewrite: null, description: null });
+                } else if (typeof conf === 'object') {
+                    if (conf.target) {
+                        subdomains["."].set(pathKey, {
+                            target: conf.target,
+                            description: conf.description || null
+                        });
+                    } else if (conf.port) {
+                        subdomains["."].set(pathKey, {
+                            port: conf.port, rewrite: conf.rewrite || null,
+                            description: conf.description || null
+                        });
+                    }
+                } else if (typeof conf === 'string') {
+                    subdomains["."].set(pathKey, { target: conf, description: null });
+                }
+
+            } else {
+                console.warn(`❌ Invalid path "${pathKey}" in config file. Must start with '/' or '@'`);
+                continue;
             }
         }
         console.log(`✅ Loaded mappings from ${configFile}`);
     }
 
-    // Load mappings to the cache
-    for (const [inputPath, conf] of mappings.entries()) {
-        if (conf.target) {
-            createOrUpdateProxies(inputPath, conf.target);
-        } else if (conf.port) {
-            createOrUpdateProxies(inputPath, `http://localhost:${conf.port}`, {
-                [`^${inputPath}`]: conf.rewrite || '/'
-            });
+    for (const subdomain of Object.keys(subdomains)) {
+        // Load mappings to the cache
+        for (const [inputPath, conf] of subdomains[subdomain].entries()) {
+            const cacheKey = `${subdomain}-${inputPath}->${conf.target || conf.port}`;
+            if (conf.target) {
+                createOrUpdateProxies(cacheKey, conf.target);
+            } else if (conf.port) {
+                createOrUpdateProxies(cacheKey, `http://localhost:${conf.port}`, {
+                    [`^${inputPath}`]: conf.rewrite || '/'
+                });
+            }
         }
     }
+
 } catch (err) {
     console.error(`❌ Failed to read ${configFile}: ${err.message}`);
     process.exit(1);
@@ -204,7 +241,17 @@ rl.question(`Enter hosting port (default ${hostPort}): `, (answer) => {
 
     // Add a middleware to handle the proxying based on the mappings
     app.use((req, res, next) => {
-        const matchedEntry = [...mappings.entries()]
+
+        // --- Subdomain matching ---
+        const hostHeader = req.headers.host || '';
+        const subdomainMatch = hostHeader.match(/^([^.]+)\.localhost/i);
+
+        let subdomain = '.';
+        if (subdomainMatch && subdomainMatch[1] !== 'www') {
+            subdomain = subdomainMatch[1];
+        }
+
+        const matchedEntry = [...subdomains[subdomain].entries()]
             .sort((a, b) => b[0].length - a[0].length)
             .find(([path]) => req.path.startsWith(path));
 
@@ -236,10 +283,12 @@ rl.question(`Enter hosting port (default ${hostPort}): `, (answer) => {
             pathRewrite = conf.rewrite ? { [`^${inputPath}`]: conf.rewrite } : undefined;
         }
 
-        const cacheKey = `${inputPath}->${target}`;
+        const cacheKey = `${subdomain}-${inputPath}->${target}`;
 
+        // console.log({ subdomain, matchedEntry })
+        // console.log({ inputPath, target, pathRewrite, cacheKey });
         deleteProxy(app, inputPath);
-        createOrUpdateProxies(inputPath, target, pathRewrite);
+        createOrUpdateProxies(cacheKey, target, pathRewrite);
 
         // Call the cached proxy handler
         return proxyCache.get(cacheKey)!(req, res, next);
@@ -247,12 +296,36 @@ rl.question(`Enter hosting port (default ${hostPort}): `, (answer) => {
 
 
     app.listen(HOST_PORT, () => {
-        renderScreen(HOST_PORT, mappings);
+        isPortLivePingChecker(subdomains).then((updated) => {
+            if (updated) renderScreen(rl)(HOST_PORT, subdomains);
+        });
+        renderScreen(rl)(HOST_PORT, subdomains);
         rl.prompt();
     });
 
     rl.on('line', (input) => {
         const trimmed = input.trim();
+
+        // Subdomain CLI: @subdomain>port or @subdomain>port/rewrite or @subdomain>fullURL
+        const subdomainUrlMatch = trimmed.match(/^@([a-zA-Z0-9_-]+)>(https?:\/\/|wss?:\/\/|ftps?:\/\/|ftp:\/\/)(.+)$/);
+        if (subdomainUrlMatch) {
+            const subdomain = subdomainUrlMatch[1];
+            const protocol = subdomainUrlMatch[2];
+            const target = protocol + subdomainUrlMatch[3];
+            subdomains[subdomain].set("/", { target });
+            renderScreen(rl)(HOST_PORT, subdomains);
+            return;
+        }
+
+        const subdomainPatternMatch = trimmed.match(/^@([a-zA-Z0-9/_-]+)>(\d{2,5})(\/.*)?$/);
+        if (subdomainPatternMatch) {
+            const subdomain = subdomainPatternMatch[1];
+            const port = parseInt(subdomainPatternMatch[2], 10);
+            const rewrite = subdomainPatternMatch[3] ? subdomainPatternMatch[3].trim() : null;
+            subdomains[subdomain].set("/", { port, rewrite });
+            renderScreen(rl)(HOST_PORT, subdomains);
+            return;
+        }
 
         // Case: if the user passed url with path
         const urlMatch = trimmed.match(/^(.+?)>(https?:\/\/|wss?:\/\/|ftps?:\/\/|ftp:\/\/)(.+)$/);
@@ -265,9 +338,9 @@ rl.question(`Enter hosting port (default ${hostPort}): `, (answer) => {
                 console.log(`❌ Invalid path: "${inputPath}". Must start with '/'`);
             } else {
                 deleteProxy(app, inputPath);
-                mappings.set(inputPath, { target });
+                subdomains["."].set(inputPath, { target });
             }
-            renderScreen(HOST_PORT, mappings);
+            renderScreen(rl)(HOST_PORT, subdomains);
             return;
         }
 
@@ -282,18 +355,18 @@ rl.question(`Enter hosting port (default ${hostPort}): `, (answer) => {
                 console.log(`❌ Invalid path: "${inputPath}". Must start with '/'`);
             } else {
                 deleteProxy(app, inputPath);
-                mappings.set(inputPath, { port, rewrite });
+                subdomains["."].set(inputPath, { port, rewrite });
             }
-            renderScreen(HOST_PORT, mappings);
+            renderScreen(rl)(HOST_PORT, subdomains);
             return;
         }
 
         // Case: if the user passed just port
         const portOnly = parseInt(trimmed, 10);
         if (!isNaN(portOnly) && portOnly > 0 && portOnly < 65536) {
-            mappings.set('/', { port: portOnly, rewrite: null });
+            subdomains["."].set('/', { port: portOnly, rewrite: null });
             deleteProxy(app, '/');
-            renderScreen(HOST_PORT, mappings);
+            renderScreen(rl)(HOST_PORT, subdomains);
             return;
         }
 
