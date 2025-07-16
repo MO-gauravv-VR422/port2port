@@ -1,6 +1,6 @@
 {
   "name": "port2port",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "type": "module",
   "title": "Port2Port",
   "description": "A simple terminal-based reverse proxy server for development that allows dynamic path-to-port mapping.",
