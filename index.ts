@@ -28,26 +28,47 @@ let hostPort = 4000;
 
 if (args.includes('-h') || args.includes('--help')) {
     console.log(`
-🧰  Dynamic port2port
+🧰  Dynamic port2port (with Subdomain Support)
 
 Usage:
-  $ port2port                 Start the proxy server (asks for host port)
-  $ port2port -f file.json    Load mapping config from custom JSON file
-  $ port2port -h | --help     Show help
-  $ port2port -v | --version  Show version
+  $ port2port                    Start the proxy server (asks for host port)
+  $ port2port -f file.json       Load mapping config from custom JSON file
+  $ port2port -h | --help        Show help
+  $ port2port -v | --version     Show version
 
-JSON Format:
+Interactive CLI Examples:
+  5000                           Map "/" to localhost:5000
+  /v2>6000                       Map "/v2" to localhost:6000
+  /v2/app>6000/api               Map "/v2/app" to localhost:6000, rewrite → "/api"
+
+Subdomain Support:
+  @aif>3032                      Map "aif.localhost:<host-port>/" to localhost:3032
+  @pms>/pms>3022/api             Map "pms.localhost:<host-port>/pms" to 3022, rewrite → "/api"
+  @external>https://api.com/v1   Map "external.localhost:<host-port>/" to an external URL
+
+JSON Config Format:
   {
+    "port": 5000,
     "mappings": {
-        "/": 5000,
-        "/v2": { "port": 5000, "rewrite": null },
-        "/api": { "port": 6000, "rewrite": "/v3" },
-        "/chat": { "target": "https://external.com/v1" }
+      "/": 4000,
+      "/v2": { "port": 5000, "rewrite": null },
+      "/api": { "port": 6000, "rewrite": "/v3" },
+      "/chat": { "target": "https://external.com/v1" },
+
+      "@aif": {
+        "/": { "port": 3031, "description": "http://aif.localhost:5000" },
+        "/aif": { "port": 3032, "rewrite": "/aif" }
+      }
     }
   }
+
+Docs:
+  🔗 Subdomain URLs → http://<subdomain>.localhost:<host-port>
+  📊 Longest prefix match takes priority for overlapping paths
 `);
     process.exit(0);
 }
+
 
 if (args.includes('-v') || args.includes('--version')) {
     console.log(`port2port version: ${version}`);
@@ -63,13 +84,6 @@ const rl = readline.createInterface({
     terminal: true,
     prompt: '🔗 Enter `path>port/rewrite?` or just `port` (e.g., /v2>6000/api or 5000): '
 });
-
-
-// Set the readline prompt to the current working directory
-setInterval(async () => {
-    const updated = await isPortLivePingChecker(subdomains);
-    if (updated) renderScreen(rl)(hostPort, subdomains);
-}, 5000); // Check every 5 seconds
 
 
 // Used for storing the initialized proxy connections
@@ -234,7 +248,6 @@ try {
     process.exit(1);
 }
 
-
 rl.question(`Enter hosting port (default ${hostPort}): `, (answer) => {
     const HOST_PORT = parseInt(answer.trim(), 10) || hostPort;
     const app = express();
@@ -294,38 +307,69 @@ rl.question(`Enter hosting port (default ${hostPort}): `, (answer) => {
         return proxyCache.get(cacheKey)!(req, res, next);
     });
 
-
     app.listen(HOST_PORT, () => {
         isPortLivePingChecker(subdomains).then((updated) => {
             if (updated) renderScreen(rl)(HOST_PORT, subdomains);
         });
         renderScreen(rl)(HOST_PORT, subdomains);
         rl.prompt();
+
+
+        // Set the readline prompt to the current working directory
+        setInterval(async () => {
+            const updated = await isPortLivePingChecker(subdomains);
+            if (updated) renderScreen(rl)(hostPort, subdomains);
+        }, 5000); // Check every 5 seconds
     });
 
+    // Handle user input for adding new mappings
     rl.on('line', (input) => {
         const trimmed = input.trim();
 
+        const subdomainPortMatch = trimmed.match(/^@([a-zA-Z0-9_-]+)>(\d{2,5})(\/.*)?$/);
+        // console.log({ trimmed, subdomainPortMatch });
+        if (subdomainPortMatch) {
+            const subdomain = subdomainPortMatch[1];
+            const port = parseInt(subdomainPortMatch[2], 10);
+            const rewrite = subdomainPortMatch[3] ? subdomainPortMatch[3].trim() : null;
+
+            if (!subdomains[subdomain]) {
+                subdomains[subdomain] = new Map<string, MappedTarget>();
+            }
+            subdomains[subdomain].set("/", { port, rewrite });
+            renderScreen(rl)(HOST_PORT, subdomains);
+            return;
+        }
+
         // Subdomain CLI: @subdomain>port or @subdomain>port/rewrite or @subdomain>fullURL
         const subdomainUrlMatch = trimmed.match(/^@([a-zA-Z0-9_-]+)>(https?:\/\/|wss?:\/\/|ftps?:\/\/|ftp:\/\/)(.+)$/);
+        // console.log({ trimmed, subdomainUrlMatch });
         if (subdomainUrlMatch) {
             const subdomain = subdomainUrlMatch[1];
             const protocol = subdomainUrlMatch[2];
             const target = protocol + subdomainUrlMatch[3];
+            if (!subdomains[subdomain]) {
+                subdomains[subdomain] = new Map<string, MappedTarget>();
+            }
             subdomains[subdomain].set("/", { target });
             renderScreen(rl)(HOST_PORT, subdomains);
             return;
         }
 
         const subdomainPatternMatch = trimmed.match(/^@([a-zA-Z0-9/_-]+)>(\d{2,5})(\/.*)?$/);
+        // console.log({ trimmed, subdomainPatternMatch });
         if (subdomainPatternMatch) {
             const subdomain = subdomainPatternMatch[1];
             const port = parseInt(subdomainPatternMatch[2], 10);
             const rewrite = subdomainPatternMatch[3] ? subdomainPatternMatch[3].trim() : null;
+            if (!subdomains[subdomain]) {
+                subdomains[subdomain] = new Map<string, MappedTarget>();
+            }
             subdomains[subdomain].set("/", { port, rewrite });
             renderScreen(rl)(HOST_PORT, subdomains);
             return;
         }
+
 
         // Case: if the user passed url with path
         const urlMatch = trimmed.match(/^(.+?)>(https?:\/\/|wss?:\/\/|ftps?:\/\/|ftp:\/\/)(.+)$/);

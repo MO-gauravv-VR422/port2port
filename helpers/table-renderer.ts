@@ -14,7 +14,9 @@ export const renderScreen = (rl) => (PORT: number, subdomains: Record<string, Ma
     console.log('  - Type a port (e.g., 5000) to map root path "/"');
     console.log('  - Type a path>port or path>port/rewrite or path>fullURL to map custom paths\n');
 
-    if (subdomains["."].size === 0) {
+    const isAnyPathMappings = Object.keys(subdomains).some((subd) => subdomains[subd].size > 0);
+    
+    if (!isAnyPathMappings) {
         console.log('🔁 No path mappings yet.');
     } else {
         console.log('🔁 Current Path Mappings:');

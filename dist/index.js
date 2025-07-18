@@ -27043,7 +27043,7 @@ import readline from "readline";
 import fs from "fs";
 import path from "path";
 // package.json
-var version = "1.0.4";
+var version = "1.0.5";
 
 // helpers/pinger.ts
 import net from "net";
@@ -27204,7 +27204,8 @@ var renderScreen = (rl) => (PORT, subdomains) => {
   console.log('  - Type a port (e.g., 5000) to map root path "/"');
   console.log(`  - Type a path>port or path>port/rewrite or path>fullURL to map custom paths
 `);
-  if (subdomains["."].size === 0) {
+  const isAnyPathMappings = Object.keys(subdomains).some((subd) => subdomains[subd].size > 0);
+  if (!isAnyPathMappings) {
     console.log("\uD83D\uDD01 No path mappings yet.");
   } else {
     console.log("\uD83D\uDD01 Current Path Mappings:");
@@ -27242,23 +27243,43 @@ var configFile = fileFlagIndex >= 0 ? args[fileFlagIndex + 1] : "port2port.json"
 var hostPort = 4000;
 if (args.includes("-h") || args.includes("--help")) {
   console.log(`
-\uD83E\uDDF0  Dynamic port2port
+\uD83E\uDDF0  Dynamic port2port (with Subdomain Support)
 
 Usage:
-  $ port2port                 Start the proxy server (asks for host port)
-  $ port2port -f file.json    Load mapping config from custom JSON file
-  $ port2port -h | --help     Show help
-  $ port2port -v | --version  Show version
+  $ port2port                    Start the proxy server (asks for host port)
+  $ port2port -f file.json       Load mapping config from custom JSON file
+  $ port2port -h | --help        Show help
+  $ port2port -v | --version     Show version
 
-JSON Format:
+Interactive CLI Examples:
+  5000                           Map "/" to localhost:5000
+  /v2>6000                       Map "/v2" to localhost:6000
+  /v2/app>6000/api               Map "/v2/app" to localhost:6000, rewrite → "/api"
+
+Subdomain Support:
+  @aif>3032                      Map "aif.localhost:<host-port>/" to localhost:3032
+  @pms>/pms>3022/api             Map "pms.localhost:<host-port>/pms" to 3022, rewrite → "/api"
+  @external>https://api.com/v1   Map "external.localhost:<host-port>/" to an external URL
+
+JSON Config Format:
   {
+    "port": 5000,
     "mappings": {
-        "/": 5000,
-        "/v2": { "port": 5000, "rewrite": null },
-        "/api": { "port": 6000, "rewrite": "/v3" },
-        "/chat": { "target": "https://external.com/v1" }
+      "/": 4000,
+      "/v2": { "port": 5000, "rewrite": null },
+      "/api": { "port": 6000, "rewrite": "/v3" },
+      "/chat": { "target": "https://external.com/v1" },
+
+      "@aif": {
+        "/": { "port": 3031, "description": "http://aif.localhost:5000" },
+        "/aif": { "port": 3032, "rewrite": "/aif" }
+      }
     }
   }
+
+Docs:
+  \uD83D\uDD17 Subdomain URLs → http://<subdomain>.localhost:<host-port>
+  \uD83D\uDCCA Longest prefix match takes priority for overlapping paths
 `);
   process.exit(0);
 }
@@ -27273,11 +27294,6 @@ var rl = readline.createInterface({
   terminal: true,
   prompt: "\uD83D\uDD17 Enter `path>port/rewrite?` or just `port` (e.g., /v2>6000/api or 5000): "
 });
-setInterval(async () => {
-  const updated = await isPortLivePingChecker(subdomains);
-  if (updated)
-    renderScreen(rl)(hostPort, subdomains);
-}, 5000);
 var proxyCache = new Map;
 var mappings = new Map;
 var subdomains = {
@@ -27436,14 +27452,34 @@ rl.question(`Enter hosting port (default ${hostPort}): `, (answer) => {
     });
     renderScreen(rl)(HOST_PORT, subdomains);
     rl.prompt();
+    setInterval(async () => {
+      const updated = await isPortLivePingChecker(subdomains);
+      if (updated)
+        renderScreen(rl)(hostPort, subdomains);
+    }, 5000);
   });
   rl.on("line", (input) => {
     const trimmed = input.trim();
+    const subdomainPortMatch = trimmed.match(/^@([a-zA-Z0-9_-]+)>(\d{2,5})(\/.*)?$/);
+    if (subdomainPortMatch) {
+      const subdomain = subdomainPortMatch[1];
+      const port = parseInt(subdomainPortMatch[2], 10);
+      const rewrite = subdomainPortMatch[3] ? subdomainPortMatch[3].trim() : null;
+      if (!subdomains[subdomain]) {
+        subdomains[subdomain] = new Map;
+      }
+      subdomains[subdomain].set("/", { port, rewrite });
+      renderScreen(rl)(HOST_PORT, subdomains);
+      return;
+    }
     const subdomainUrlMatch = trimmed.match(/^@([a-zA-Z0-9_-]+)>(https?:\/\/|wss?:\/\/|ftps?:\/\/|ftp:\/\/)(.+)$/);
     if (subdomainUrlMatch) {
       const subdomain = subdomainUrlMatch[1];
       const protocol = subdomainUrlMatch[2];
       const target = protocol + subdomainUrlMatch[3];
+      if (!subdomains[subdomain]) {
+        subdomains[subdomain] = new Map;
+      }
       subdomains[subdomain].set("/", { target });
       renderScreen(rl)(HOST_PORT, subdomains);
       return;
@@ -27453,6 +27489,9 @@ rl.question(`Enter hosting port (default ${hostPort}): `, (answer) => {
       const subdomain = subdomainPatternMatch[1];
       const port = parseInt(subdomainPatternMatch[2], 10);
       const rewrite = subdomainPatternMatch[3] ? subdomainPatternMatch[3].trim() : null;
+      if (!subdomains[subdomain]) {
+        subdomains[subdomain] = new Map;
+      }
       subdomains[subdomain].set("/", { port, rewrite });
       renderScreen(rl)(HOST_PORT, subdomains);
       return;
